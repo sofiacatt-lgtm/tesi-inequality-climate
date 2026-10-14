@@ -12,7 +12,7 @@ mu = 2.0
 r = 0.01
 Ybar = 0.5
 A_p_bar = 1.7
-A_up_bar = 1.2
+A_up_bar = 1.5
 
 # Shock
 p = 0.5

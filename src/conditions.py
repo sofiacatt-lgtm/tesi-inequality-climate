@@ -17,8 +17,7 @@ from functions import (EA_p, EA_up, EA_p_min, EA_p_max,
 # 'shock'     → realizzazione effettiva con shock    (prob p   ad ogni step)
 
 MODES            = ("expected", "noshock", "shock")
-SIMULATION_MODES = ("noshock", "shock")   # unici mode con produttività reale
-
+SIMULATION_MODES = ("noshock", "shock")   
 
 def _get_productivities(mode, A_p_bar, A_up_bar, n_p_min=0, n_p_max=1,
                         p=None, gamma_p=None, gamma_up=None, q=None):
@@ -72,15 +71,72 @@ def _Ap_at_np(mode, A_p_bar, n_p, p=None, gamma_p=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2.  CONDIZIONI PRIMITIVE
+# 2.  CONDIZIONI FONDAMENTALI + FUNZIONE PER VERIFICARLE + COND PRIMITIVE
 # ═══════════════════════════════════════════════════════════════════════════════
+def _cond_1_fund(Ap_min, Aup):
+    """(1)  E(A_p) > E(A_up), verificata al valore minimo n_p=0 (E(A_p) e'
+    crescente in n_p, quindi se vale li' vale per ogni n_p in [0,1])."""
+    return Ap_min > Aup
+
+def _cond_2a_fund(Ap_min, r):
+    """(2a) E(A_p) > 1+r per ogni n_p in [0,1], verificata al minimo n_p=0:
+    le famiglie protette preferiscono investire tutto piuttosto che
+    depositare, per ogni n_p ammissibile."""
+    return Ap_min > 1 + r
+
+def _cond_11_fund(Aup, r):
+    """(11) E(A_up) > 1+r: le famiglie non protette preferiscono investire
+    tutto piuttosto che depositare."""
+    return Aup > 1 + r
+
+
+def check_foundational_assumptions(A_p_bar, A_up_bar, r=None,
+                                    p=None, gamma_p=None, gamma_up=None, q=None,
+                                    verbose=True):
+    """
+    Controlla le condizioni (1), (2a), (11) del .tex — le assunzioni sotto cui
+    la mappa piecewise-affine (e quindi dynamics.update_wealth) e' la
+    rappresentazione corretta della scelta ottima delle famiglie. Vanno
+    verificate ogni volta che si cambiano A_p_bar, A_up_bar, r, p, q, gamma_p,
+    gamma_up .
+
+    Nota: sono condizioni sulle produttivita' ATTESE (mode 'expected'), perche'
+    la scelta di portafoglio della famiglia e' fatta ex-ante rispetto allo
+    shock (si veda "Investment choices" nel .tex): vanno controllate con le
+    produttivita' attese indipendentemente da quale mode (noshock/shock) si usi
+    poi per SIMULARE la dinamica realizzata — la scelta d*=0 e' presa prima che
+    lo shock si realizzi.
+
+    Ritorna True se tutte e tre valgono; altrimenti, stampa quali falliscono.
+    """
+    if r is None: r = _par.r
+    Ap_min, _, Aup = _get_productivities('expected', A_p_bar, A_up_bar,
+                                          p=p, gamma_p=gamma_p, gamma_up=gamma_up, q=q)
+    c1  = _cond_1_fund(Ap_min, Aup)
+    c2a = _cond_2a_fund(Ap_min, r)
+    c11 = _cond_11_fund(Aup, r)
+
+    if verbose:
+        print("╔══ ASSUNZIONI FONDAZIONALI (1),(2a),(11) ══╗")
+        print(f"  E(A_p) al minimo (n_p=0) = {Ap_min:.4f}   E(A_up) = {Aup:.4f}   1+r = {1+r:.4f}")
+        print(f"  (1)  E(Ap) > E(Aup) : {'OK' if c1 else 'VIOLATA'}")
+        print(f"  (2a) E(Ap) > 1+r    : {'OK' if c2a else 'VIOLATA'}")
+        print(f"  (11) E(Aup) > 1+r   : {'OK' if c11 else 'VIOLATA'}")
+        if not (c1 and c2a and c11):
+            print("  ATTENZIONE: con assunzioni violate, dynamics.update_wealth applica comunque")
+            print("  la formula \"investi tutto\" incondizionatamente — la formula usata dal codice")
+            print("  non corrisponde piu' alla scelta ottima della famiglia per questi parametri.")
+        print()
+
+    return c1 and c2a and c11
+
 
 def _cond1(Aup, mu, r, alpha, xF, Ybar):
     """(5.2)  f_L(xF) < xF  →  poor branch contrattivo in xF."""
     return Aup*(1+mu) - mu*(1+r) - 1/(1-alpha) + Ybar/xF < 0
 
 def _cond2(Ap, mu, r, alpha, xF, Ybar):
-    """(6)  f_R(xF) > xF  valutata al caso n_p = 0 (lower bound produttività protetta)."""
+    """(6)  f_R(xF) > xF  valutata nel n_p che si mette dentro la chiamata di Ap."""
     return Ap*(1+mu) - mu*(1+r) - 1/(1-alpha) + Ybar/xF > 0
     
 def _cond3(Ap_min, mu, r, alpha):
@@ -143,6 +199,49 @@ def n_star_simulation(A_p_bar, mu=None, r=None, alpha=None, gamma_p=None):
     dict con chiavi 'noshock' e 'shock'
     """
     return {m: n_star(m, A_p_bar, mu=mu, r=r, alpha=alpha, gamma_p=gamma_p)
+            for m in SIMULATION_MODES}
+
+
+def n_dagger(mode, A_p_bar, mu=None, r=None, alpha=None, xF=None, Ybar=None,
+             p=None, gamma_p=None):
+    """
+    n^P critico tale che f_R(xF) = xF  nel
+    mode scelto.
+
+    E' un secondo tipping point, DIVERSO da n_star: n_star riguarda la
+    PENDENZA di f_R (a_R<1 o >1), n_dagger riguarda la POSIZIONE di f_R(xF)
+    rispetto alla bisettrice. Sotto n_dagger, anche se il ramo destro fosse
+    contrattivo (a_R<1), il suo punto fisso implicito cadrebbe fuori dal
+    dominio ammissibile x>xF: nessuna famiglia puo' sostenere il regime
+    ricco, e il regime e' 'unique_poor_attractor' invece di
+    'poor_and_rich_attractor'.
+
+    Vale sempre n_dagger <= n_star
+
+        n_dagger = n_star - Ybar / ((1+mu) * xF * C)
+
+    con C = A_p(n_p=0) nel mode scelto (stessa costante usata in n_star).
+    Puo' essere negativo (fuori da [0,1]): in quel caso la condizione (6)
+    vale gia' per ogni n_p ammissibile e la fase 'unique_poor_attractor' e'
+    assente per costruzione (e' il caso dei parametri di default in
+    parameters.py).
+    """
+    if mode not in MODES:
+        raise ValueError(f"mode deve essere uno di {MODES}, ricevuto '{mode}'")
+    if mu    is None: mu    = _par.mu
+    if r     is None: r     = _par.r
+    if alpha is None: alpha = _par.alpha
+    if xF    is None: xF    = _par.xF
+    if Ybar  is None: Ybar  = _par.Ybar
+
+    C  = _Ap_at_np(mode, A_p_bar, 0, p=p, gamma_p=gamma_p)
+    ns = n_star(mode, A_p_bar, mu=mu, r=r, alpha=alpha, p=p, gamma_p=gamma_p)
+    return ns - Ybar / ((1 + mu) * xF * C)
+
+
+def n_dagger_simulation(A_p_bar, mu=None, r=None, alpha=None, xF=None, Ybar=None, gamma_p=None):
+    """Analogo di n_star_simulation, ma per n_dagger (vedi n_dagger())."""
+    return {m: n_dagger(m, A_p_bar, mu=mu, r=r, alpha=alpha, xF=xF, Ybar=Ybar, gamma_p=gamma_p)
             for m in SIMULATION_MODES}
 
 
@@ -257,6 +356,28 @@ def regime_map(mode, A_p_bar, A_up_bar, n_grid=200, **kwargs):
     return n_values, regimes
 
 
+def regime_transitions(mode, A_p_bar, A_up_bar, n_grid=400, **kwargs):
+    """
+    Scandisce n_p in [0,1] con regime_map e restituisce tutti i punti in cui
+    il regime cambia, SENZA assumere a priori quali o quante soglie esistano
+    (rileva n_star, n_dagger, ed eventuali altre soglie non ancora derivate
+    analiticamente). non dipende da
+    dove pensiamo che siano i tipping point, li trova scandendo la griglia.
+
+    Returns
+    -------
+    initial_regime : regime per n_p vicino a 0
+    transitions    : lista di tuple (n_p_approx, regime_prima, regime_dopo),
+                     in ordine di n_p crescente
+    """
+    n_values, regimes = regime_map(mode, A_p_bar, A_up_bar, n_grid=n_grid, **kwargs)
+    transitions = []
+    for i in range(1, len(n_values)):
+        if regimes[i] != regimes[i - 1]:
+            transitions.append((n_values[i], regimes[i - 1], regimes[i]))
+    return regimes[0], transitions
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 7.  DIAGNOSTICA
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -266,12 +387,13 @@ def _print_mode_block(mode, kw):
     A_p_bar  = kw["A_p_bar"]
     A_up_bar = kw["A_up_bar"]
     mu, r, alpha = kw["mu"], kw["r"], kw["alpha"]
+    xF, Ybar     = kw["xF"], kw["Ybar"]
     p, gamma_p   = kw.get("p"), kw.get("gamma_p")
 
-    ns    = n_star(mode, A_p_bar, mu=mu, r=r, alpha=alpha, p=p, gamma_p=gamma_p)
-    
-    lbtype= left_branch_type(mode, **kw)
+    ns = n_star(mode, A_p_bar, mu=mu, r=r, alpha=alpha, p=p, gamma_p=gamma_p)
+    nd = n_dagger(mode, A_p_bar, mu=mu, r=r, alpha=alpha, xF=xF, Ybar=Ybar, p=p, gamma_p=gamma_p)
 
+    lbtype = left_branch_type(mode, **kw)
     rbtype = right_branch_type(mode, **kw)
 
     sep = "─" * 55
@@ -280,17 +402,24 @@ def _print_mode_block(mode, kw):
     print(sep)
     print(f"  Tipo ramo sinistro : {lbtype}")
     print(f"  Tipo ramo destro : {rbtype}")
-    print(f"  n*               = {ns:.4f}  "
+    print(f"  n_dagger (soglia di POSIZIONE, f_R(xF)=xF) = {nd:.4f}  "
+          + ("(in [0,1] )" if 0 < nd < 1 else "(not in [0,1] )"))
+    print(f"  n*       (soglia di PENDENZA,  a_R=1)      = {ns:.4f}  "
           + ("(in [0,1] )" if 0 < ns < 1 else "(not in [0,1] )"))
+    if nd > ns:
+        print("  ATTENZIONE: n_dagger > n* — non dovrebbe succedere (n_dagger<=n* per costruzione); "
+              "controllare i parametri.")
     print(f"  a_R(n_p = 0)     = {slope_R(0,               mode, A_p_bar, mu, r, alpha, p=p, gamma_p=gamma_p):.4f}")
     print(f"  a_R(n_p = n*)    = {slope_R(max(0,min(ns,1)),mode, A_p_bar, mu, r, alpha, p=p, gamma_p=gamma_p):.4f}")
     print(f"  a_R(n_p = 1)     = {slope_R(1,               mode, A_p_bar, mu, r, alpha, p=p, gamma_p=gamma_p):.4f}")
 
-    if 0 < ns < 1:
-        print(f"  Regime n_p < n*  : {regime(max(ns-0.05, 0), mode, **kw)}")
-        print(f"  Regime n_p > n*  : {regime(min(ns+0.05, 1), mode, **kw)}")
-    else:
-        print(f"  Regime (n_p=0.5) : {regime(0.5, mode, **kw)}")
+    # scansione automatica: non assume a priori quali/quante soglie esistano
+    initial_regime, transitions = regime_transitions(mode, **kw)
+    print(f"  Regime per n_p vicino a 0 : {initial_regime}")
+    if not transitions:
+        print("  Nessuna transizione di regime rilevata in [0,1].")
+    for n_p_t, before, after in transitions:
+        print(f"  transizione vicino a n_p≈{n_p_t:.4f} : {before}  →  {after}")
     print()
 
 
